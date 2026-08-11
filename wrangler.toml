@@ -13,3 +13,11 @@ id = "YOUR_KV_NAMESPACE_ID"
 
 [cache]
 enabled = true
+
+[assets]
+directory = "./assets"
+binding = "ASSETS"
+run_worker_first = true
+
+[secrets]
+required = ["API_TOKEN"]

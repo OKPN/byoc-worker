@@ -7,28 +7,33 @@ const app = new Hono();
 const corsMiddleware = cors({
   origin: "*",
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "Authorization"],
+  allowHeaders: ["Content-Type", "Authorization", "X-Upload-Password"],
 });
 app.use("*", corsMiddleware);
 
 function getExpectedToken(c) {
-  return c.env.API_TOKEN || c.env.AUTH_TOKEN || c.env.TOKEN || c.env.SECRET_TOKEN || c.env.api_token || "";
+  return c.env.API_TOKEN || "";
 }
+
+const requireApiToken = (c) => {
+  const expectedToken = getExpectedToken(c);
+  if (!expectedToken) {
+    return c.json({ error: "Service unavailable: API_TOKEN is not configured" }, 503, {
+      "Cache-Control": "no-store",
+    });
+  }
+  const authHeader = c.req.header("Authorization");
+  const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : "";
+  if (token !== expectedToken) {
+    return c.json({ error: "Unauthorized" }, 401, { "Cache-Control": "no-store" });
+  }
+  return null;
+};
 
 // 認証チェックミドルウェア
 app.use("/api/*", async (c, next) => {
-  const expectedToken = getExpectedToken(c);
-  if (!expectedToken) {
-    return await next();
-  }
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return c.json({ error: "Unauthorized: Missing token" }, 401);
-  }
-  const token = authHeader.substring(7);
-  if (token !== expectedToken) {
-    return c.json({ error: "Unauthorized: Invalid token" }, 401);
-  }
+  const authError = requireApiToken(c);
+  if (authError) return authError;
   await next();
 });
 
@@ -40,18 +45,13 @@ app.get("/", (c) => {
 // 1. 一時共有アップロード受取 (POST /temp-upload)
 app.post("/temp-upload", async (c) => {
   try {
-    const expectedToken = getExpectedToken(c);
-    if (expectedToken) {
-      const authHeader = c.req.header("Authorization");
-      const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : "";
-      if (token !== expectedToken) {
-        return c.json({ error: "Unauthorized: Invalid token" }, 401);
-      }
-    }
+    const authError = requireApiToken(c);
+    if (authError) return authError;
 
     const rawFilename = c.req.query("filename") || "file";
-    const ttl = Math.max(60, parseInt(c.req.query("ttl") || "259200", 10));
-    const password = c.req.query("password") || "";
+    const requestedTtl = Number.parseInt(c.req.query("ttl") || "259200", 10);
+    const ttl = Math.min(7 * 86400, Math.max(60, Number.isFinite(requestedTtl) ? requestedTtl : 259200));
+    const password = c.req.header("X-Upload-Password") || "";
     const contentType = c.req.header("Content-Type") || "application/octet-stream";
 
     const baseFilename = rawFilename.replace(/[\/\\]/g, "_");
@@ -82,7 +82,7 @@ app.post("/temp-upload", async (c) => {
         contentType,
         filename: shortKey,
         expiration,
-        password,
+        ...(await createPasswordMetadata(password)),
         size: body.byteLength,
       },
     });
@@ -156,6 +156,101 @@ const recordPasswordFailure = async (kv, attemptKey, currentAttempt, policy) => 
   return blockedUntil;
 };
 
+// Cloudflare Workers Web Crypto の PBKDF2 は反復回数 100,000 回まで対応する。
+const PASSWORD_HASH_ITERATIONS = 100000;
+const PASSWORD_HASH_BYTES = 32;
+const SESSION_MAX_AGE_SECONDS = 86400;
+
+const bytesToBase64Url = (bytes) => btoa(String.fromCharCode(...bytes))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+
+const base64UrlToBytes = (value) => {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
+  return Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+};
+
+const bytesEqual = (left, right) => {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+};
+
+const derivePasswordHash = async (password, salt) => {
+  const material = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"],
+  );
+  const derived = await crypto.subtle.deriveBits({
+    name: "PBKDF2",
+    hash: "SHA-256",
+    salt,
+    iterations: PASSWORD_HASH_ITERATIONS,
+  }, material, PASSWORD_HASH_BYTES * 8);
+  return new Uint8Array(derived);
+};
+
+const createPasswordMetadata = async (password) => {
+  if (!password) return { passwordHash: "", passwordSalt: "" };
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await derivePasswordHash(password, salt);
+  return {
+    passwordHash: bytesToBase64Url(hash),
+    passwordSalt: bytesToBase64Url(salt),
+  };
+};
+
+const hasPasswordProtection = (metadata) => Boolean(metadata?.passwordHash && metadata?.passwordSalt) || Boolean(metadata?.password);
+
+const verifyPassword = async (password, metadata) => {
+  if (metadata?.passwordHash && metadata?.passwordSalt) {
+    const expectedHash = base64UrlToBytes(metadata.passwordHash);
+    const actualHash = await derivePasswordHash(password, base64UrlToBytes(metadata.passwordSalt));
+    return bytesEqual(actualHash, expectedHash);
+  }
+  // 旧バージョンの共有ファイルは、閲覧成功時に PBKDF2 メタデータへ自動移行する。
+  return Boolean(metadata?.password) && password === metadata.password;
+};
+
+const getPasswordFingerprint = async (metadata) => {
+  if (metadata?.passwordHash && metadata?.passwordSalt) return `${metadata.passwordSalt}.${metadata.passwordHash}`;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(metadata?.password || ""));
+  return bytesToBase64Url(new Uint8Array(digest));
+};
+
+const signSessionPayload = async (payload, secret) => {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  return bytesToBase64Url(new Uint8Array(signature));
+};
+
+const createSessionToken = async (shortKey, metadata, secret) => {
+  const payload = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({
+    key: shortKey,
+    fingerprint: await getPasswordFingerprint(metadata),
+    expiresAt: Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS,
+  })));
+  return `${payload}.${await signSessionPayload(payload, secret)}`;
+};
+
+const verifySessionToken = async (token, shortKey, metadata, secret) => {
+  try {
+    if (!secret) return false;
+    const [payload, signature] = token.split(".");
+    if (!payload || !signature || !bytesEqual(base64UrlToBytes(signature), base64UrlToBytes(await signSessionPayload(payload, secret)))) return false;
+    const session = JSON.parse(new TextDecoder().decode(base64UrlToBytes(payload)));
+    return session.key === shortKey
+      && session.fingerprint === await getPasswordFingerprint(metadata)
+      && Number.isInteger(session.expiresAt)
+      && session.expiresAt > Math.floor(Date.now() / 1000);
+  } catch {
+    return false;
+  }
+};
+
 const renderPasswordPromptHtml = (filename, errorMsg = "") => {
   return `<!DOCTYPE html>
 <html lang="ja">
@@ -210,27 +305,51 @@ const getContentTypeFromFilename = (filename, fallback = "application/octet-stre
   return mimeTypes[ext] || fallback;
 };
 
+const getCustomNotFoundResponse = async (c) => {
+  if (!c.env.ASSETS) return null;
+  const asset = await c.env.ASSETS.fetch(new URL("/404.webp", c.req.url));
+  if (!asset.ok) return null;
+
+  return new Response(asset.body, {
+    status: 404,
+    headers: {
+      "Content-Type": asset.headers.get("Content-Type") || "image/webp",
+      "Cache-Control": "public, max-age=60",
+      "Cloudflare-CDN-Cache-Control": "public, max-age=3600",
+    },
+  });
+};
+
 // 2. 一時共有ファイル配信ハンドラ
 const handleTempFetch = async (c, rawShortKey) => {
   try {
     const shortKey = decodeURIComponent(rawShortKey);
     const kvKey = `temp_${shortKey}`;
-    const { value, metadata } = await c.env.TEMP_KV.getWithMetadata(kvKey, "arrayBuffer");
+    const { value, metadata: storedMetadata } = await c.env.TEMP_KV.getWithMetadata(kvKey, "arrayBuffer");
+    let metadata = storedMetadata || {};
 
     if (!value) {
-      // ブラウザには保存させず、Cloudflare エッジだけで 30 日間キャッシュする。
+      // 任意の静的アセットがあれば、404 ステータスのまま画像を返す。
+      const customNotFound = await getCustomNotFoundResponse(c);
+      if (customNotFound) return customNotFound;
+
+      // ブラウザには保存させず、Cloudflare エッジだけで 1 時間キャッシュする。
       // これにより同じ消滅済み URL への再アクセスは Worker/KV を実行しない。
-      return c.text("404 Not Found - この一時ファイルは指定された保持期限が切れたため完全自動消滅しました。", 404, {
+      return c.text("404 Not Found — File not found or expired.", 404, {
         "Cache-Control": "no-store",
-        "Cloudflare-CDN-Cache-Control": "public, max-age=2592000",
+        "Cloudflare-CDN-Cache-Control": "public, max-age=3600",
       });
     }
 
     // パスワード保護の判定 (POST ＋ Cookie 認証方式)
-    if (metadata && metadata.password) {
+    if (hasPasswordProtection(metadata)) {
+      const sessionSecret = getExpectedToken(c);
+      if (!sessionSecret) {
+        return c.text("Service unavailable: password authentication is not configured", 503, { "Cache-Control": "no-store" });
+      }
       const cookies = parseCookies(c.req.header("Cookie"));
       const cookieKey = `file_auth_${encodeURIComponent(shortKey)}`;
-      const isCookieAuthed = cookies[cookieKey] === metadata.password;
+      const isCookieAuthed = await verifySessionToken(cookies[cookieKey] || "", shortKey, metadata, sessionSecret);
 
       let inputPwd = "";
       if (c.req.method === "POST") {
@@ -238,9 +357,6 @@ const handleTempFetch = async (c, rawShortKey) => {
           const body = await c.req.parseBody();
           inputPwd = body.pwd || "";
         } catch (e) {}
-      }
-      if (!inputPwd) {
-        inputPwd = c.req.query("pwd") || c.req.header("X-File-Password") || "";
       }
 
       const isPasswordPost = c.req.method === "POST" && !isCookieAuthed;
@@ -258,8 +374,14 @@ const handleTempFetch = async (c, rawShortKey) => {
         });
       }
 
+      if (!isCookieAuthed && c.req.method !== "POST") {
+        return c.html(renderPasswordPromptHtml(shortKey), 200, { "Cache-Control": "no-store" });
+      }
+
+      const isPasswordValid = isCookieAuthed || await verifyPassword(inputPwd, metadata);
+
       // 未認証かつ不一致の場合
-      if (!isCookieAuthed && inputPwd !== metadata.password) {
+      if (!isPasswordValid) {
         // Botやプログラムによる高速なパスワード試行・総当たり攻撃を遅延（1秒）させて完全に鈍化・無効化
         if (c.req.method === "POST" || inputPwd) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -278,17 +400,26 @@ const handleTempFetch = async (c, rawShortKey) => {
       }
 
       // POST送信で成功した場合: CookieをセットしてクリーンなGET URLへ303リダイレクト！
-      if (c.req.method === "POST" && inputPwd === metadata.password) {
+      if (c.req.method === "POST" && isPasswordValid) {
         if (attemptKey) {
           await c.env.TEMP_KV.delete(attemptKey);
         }
+        if (metadata.password && !metadata.passwordHash) {
+          const remainingTtl = (metadata.expiration || 0) - Math.floor(Date.now() / 1000);
+          if (remainingTtl >= 60) {
+            const { password: legacyPassword, ...safeMetadata } = metadata;
+            metadata = { ...safeMetadata, ...(await createPasswordMetadata(inputPwd)) };
+            await c.env.TEMP_KV.put(kvKey, value, { expirationTtl: remainingTtl, metadata });
+          }
+        }
         const publicOrigin = new URL(c.req.url).origin;
         const cleanUrl = `${publicOrigin}/${encodeURIComponent(shortKey)}`;
+        const sessionToken = await createSessionToken(shortKey, metadata, sessionSecret);
         return new Response(null, {
           status: 303,
           headers: {
             "Location": cleanUrl,
-            "Set-Cookie": `${cookieKey}=${encodeURIComponent(metadata.password)}; Path=/; Max-Age=86400; Secure; SameSite=Lax`,
+            "Set-Cookie": `${cookieKey}=${sessionToken}; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}; Secure; HttpOnly; SameSite=Lax`,
           },
         });
       }
@@ -301,8 +432,12 @@ const handleTempFetch = async (c, rawShortKey) => {
     const totalBytes = value.byteLength;
     const rangeHeader = c.req.header("Range");
 
-    const hasPassword = Boolean(metadata && metadata.password);
-    const cacheControlHeader = hasPassword ? "private, no-transform, max-age=86400" : "public, max-age=86400";
+    const hasPassword = hasPasswordProtection(metadata);
+    // パスワードはアップロード時に確定し変更不可のため、公開ファイルは安全にキャッシュできる。
+    // パスワード保護ファイルはブラウザにもエッジにも保存しない。
+    const cacheControlHeader = hasPassword
+      ? "private, no-store, no-transform"
+      : "public, max-age=86400";
     const varyHeader = hasPassword ? "Cookie, Accept-Encoding" : "Accept-Encoding";
 
     // Rangeリクエスト対応
@@ -387,7 +522,7 @@ app.get("/api/temp-files", async (c) => {
         size: metadata.size || 0,
         expiration,
         remaining,
-        hasPassword: Boolean(metadata.password),
+        hasPassword: hasPasswordProtection(metadata),
       };
     });
 
@@ -444,37 +579,8 @@ app.post("/api/temp-extend", async (c) => {
   }
 });
 
-// 6. 一時共有ファイルパスワード設定・変更 API (POST /api/temp-set-password)
-// stream 型で読み込むことでメモリ使用量を削減
-app.post("/api/temp-set-password", async (c) => {
-  try {
-    const { key, password } = await c.req.json();
-    if (!key) return c.json({ error: "No key provided" }, 400);
-
-    const kvKey = `temp_${key}`;
-    const { value, metadata } = await c.env.TEMP_KV.getWithMetadata(kvKey, "stream");
-    if (!value) {
-      return c.json({ error: "ファイルが見つかりません" }, 404);
-    }
-
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const currentExp = (metadata && metadata.expiration) ? metadata.expiration : (nowSeconds + 86400);
-    const newTtl = Math.max(60, currentExp - nowSeconds);
-
-    await c.env.TEMP_KV.put(kvKey, value, {
-      expirationTtl: newTtl,
-      metadata: {
-        ...metadata,
-        password: password || "",
-      },
-    });
-
-    return c.json({ success: true, hasPassword: Boolean(password) });
-  } catch (error) {
-    console.error("Set password error:", error);
-    return c.json({ error: error.message }, 500);
-  }
-});
+// ※ パスワードはアップロード時に確定し、後からの変更・解除は不可とする。
+// これにより公開ファイルのエッジキャッシュを安全に維持できる。
 
 // 7. 一時共有ファイルリネーム API (POST /api/temp-rename)
 // stream 型で読み込むことでメモリ使用量を削減
