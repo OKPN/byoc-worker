@@ -1,0 +1,15 @@
+name = "byoc-worker"
+main = "server.js"
+compatibility_date = "2026-06-28"
+workers_dev = true
+
+routes = [
+  { pattern = "your-custom-domain.com", custom_domain = true }
+]
+
+[[kv_namespaces]]
+binding = "TEMP_KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[cache]
+enabled = true
