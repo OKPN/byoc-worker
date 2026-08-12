@@ -11,9 +11,7 @@ const corsMiddleware = cors({
 });
 app.use("*", corsMiddleware);
 
-const getAdminToken = (c) => {
-  return c.env.API_TOKEN || c.env.AUTH_TOKEN || c.env.TOKEN || c.env.SECRET_TOKEN || c.env.api_token || "";
-};
+const getApiToken = (c) => c.env.API_TOKEN || "";
 
 // Cloudflare CDN Cache Purge バックグラウンド非同期処理 (Pattern B)
 const purgeCacheAsync = async (env, targetUrls) => {
@@ -41,12 +39,8 @@ const purgeCacheAsync = async (env, targetUrls) => {
   }
 };
 
-function getExpectedToken(c) {
-  return c.env.API_TOKEN || "";
-}
-
 const requireApiToken = (c) => {
-  const expectedToken = getExpectedToken(c);
+  const expectedToken = getApiToken(c);
   if (!expectedToken) {
     return c.json({ error: "Service unavailable: API_TOKEN is not configured" }, 503, {
       "Cache-Control": "no-store",
@@ -401,7 +395,7 @@ const handleTempFetch = async (c, rawShortKey) => {
 
     // パスワード保護の判定 (POST ＋ Cookie 認証方式)
     if (hasPasswordProtection(metadata)) {
-      const sessionSecret = getExpectedToken(c);
+      const sessionSecret = getApiToken(c);
       if (!sessionSecret) {
         return c.text("Service unavailable: password authentication is not configured", 503, { "Cache-Control": "no-store" });
       }
