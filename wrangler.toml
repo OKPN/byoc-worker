@@ -21,3 +21,22 @@ run_worker_first = true
 
 [secrets]
 required = ["API_TOKEN"]
+
+# ─── 🧪 テスト/ステージング環境 (npx wrangler deploy --env staging) ───
+[env.staging]
+name = "byoc-worker-staging"
+workers_dev = true
+routes = [] # workers.dev サブドメインのみを使用
+
+[env.staging.secrets]
+required = ["API_TOKEN"]
+
+[[env.staging.kv_namespaces]]
+binding = "TEMP_KV"
+id = "YOUR_STAGING_KV_NAMESPACE_ID"
+
+[env.staging.assets]
+directory = "./assets"
+binding = "ASSETS"
+run_worker_first = true
+
