@@ -51,7 +51,7 @@ app.post("/temp-upload", async (c) => {
     const rawFilename = c.req.query("filename") || "file";
     const requestedTtl = Number.parseInt(c.req.query("ttl") || "259200", 10);
     const ttl = Math.min(7 * 86400, Math.max(60, Number.isFinite(requestedTtl) ? requestedTtl : 259200));
-    const password = c.req.header("X-Upload-Password") || "";
+    const password = c.req.header("X-Upload-Password") || c.req.query("password") || "";
     const contentType = c.req.header("Content-Type") || "application/octet-stream";
 
     const baseFilename = rawFilename.replace(/[\/\\]/g, "_");
