@@ -85,6 +85,19 @@ Upon successful deployment, your Worker endpoint URL (e.g., `https://byoc-worker
 
 ---
 
+### 🌐 Custom Domain Setup (Optional)
+
+If you want to serve your uploaded files using your own custom domain (e.g., `img.yourdomain.com`) instead of the default `.workers.dev` subdomain:
+
+1. Open [Cloudflare Dashboard](https://dash.cloudflare.com/) ➔ **Workers & Pages**
+2. Select your Worker (`byoc-worker`)
+3. Go to **Settings** ➔ **Triggers** ➔ **Custom Domains**
+4. Click **Add Custom Domain** and enter your domain name (e.g., `img.yourdomain.com`).
+
+*(Cloudflare will automatically configure DNS records and manage free SSL certificates for your domain.)*
+
+---
+
 ## 🌐 Connecting to BYOC Converter
 
 1. Open [BYOC Converter](https://okpn.github.io/byoc-converter/)
