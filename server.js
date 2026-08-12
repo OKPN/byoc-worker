@@ -464,14 +464,15 @@ const handleTempFetch = async (c, rawShortKey) => {
 
     const hasPassword = hasPasswordProtection(metadata);
     
-    // 残り寿命 (TTL) に応じた動的キャッシュ制御
+    // 掲示板用途に最適化した 1時間 (3600秒) キャッシュ制御
+    const ONE_HOUR_SECONDS = 3600;
     let cacheControlHeader = "";
     let cdnCacheControlHeader = "";
 
     if (hasPassword) {
       if (isAuthedUser) {
-        // パスワード認証済み本人：個人のブラウザローカルのみに残り寿命分だけキャッシュを許可
-        cacheControlHeader = `private, max-age=${remainingSeconds}`;
+        // パスワード認証済み本人：個人のブラウザローカルのみに1時間キャッシュを許可
+        cacheControlHeader = `private, max-age=${ONE_HOUR_SECONDS}`;
         cdnCacheControlHeader = "private, no-store";
       } else {
         // 未認証：一切のキャッシュを不許可
@@ -479,9 +480,9 @@ const handleTempFetch = async (c, rawShortKey) => {
         cdnCacheControlHeader = "private, no-store";
       }
     } else {
-      // 通常ファイル：ブラウザ・エッジ両方でファイルの残り寿命分（TTL）と完全に動的同調・一致！
-      cacheControlHeader = `public, max-age=${remainingSeconds}`;
-      cdnCacheControlHeader = `public, max-age=${remainingSeconds}`;
+      // 通常ファイル（保護なし）：ブラウザ・Cloudflareエッジで1時間 (3600秒) キャッシュ
+      cacheControlHeader = `public, max-age=${ONE_HOUR_SECONDS}`;
+      cdnCacheControlHeader = `public, max-age=${ONE_HOUR_SECONDS}`;
     }
 
     const varyHeader = hasPassword ? "Cookie, Accept-Encoding" : "Accept-Encoding";
