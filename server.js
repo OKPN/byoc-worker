@@ -306,19 +306,39 @@ const getContentTypeFromFilename = (filename, fallback = "application/octet-stre
   return mimeTypes[ext] || fallback;
 };
 
+const NOT_FOUND_ASSETS = [
+  { path: "/404.webp", mime: "image/webp" },
+  { path: "/404-cat.jpg", mime: "image/jpeg" },
+  { path: "/404-robot.jpg", mime: "image/jpeg" },
+];
+
 const getCustomNotFoundResponse = async (c) => {
   if (!c.env.ASSETS) return null;
-  const asset = await c.env.ASSETS.fetch(new URL("/404.webp", c.req.url));
-  if (!asset.ok) return null;
 
-  return new Response(asset.body, {
-    status: 404,
-    headers: {
-      "Content-Type": asset.headers.get("Content-Type") || "image/webp",
-      "Cache-Control": "public, max-age=60",
-      "Cloudflare-CDN-Cache-Control": "public, max-age=3600",
-    },
-  });
+  try {
+    const randomIndex = Math.floor(Math.random() * NOT_FOUND_ASSETS.length);
+    const chosenAsset = NOT_FOUND_ASSETS[randomIndex];
+
+    let asset = await c.env.ASSETS.fetch(new URL(chosenAsset.path, c.req.url));
+    if (!asset.ok) {
+      asset = await c.env.ASSETS.fetch(new URL("/404.webp", c.req.url));
+    }
+    if (!asset.ok) return null;
+
+    const contentType = asset.headers.get("Content-Type") || chosenAsset.mime || "image/jpeg";
+
+    return new Response(asset.body, {
+      status: 404,
+      headers: {
+        "Content-Type": contentType,
+        "Cache-Control": "public, max-age=86400",
+        "Cloudflare-CDN-Cache-Control": "public, max-age=2592000", // Cloudflare エッジ 30日 キャッシュ
+      },
+    });
+  } catch (err) {
+    console.error("Custom 404 asset fetch error:", err);
+    return null;
+  }
 };
 
 // 2. 一時共有ファイル配信ハンドラ
