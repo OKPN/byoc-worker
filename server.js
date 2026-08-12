@@ -362,6 +362,8 @@ const handleTempFetch = async (c, rawShortKey) => {
       });
     }
 
+    let isAuthedUser = false;
+
     // パスワード保護の判定 (POST ＋ Cookie 認証方式)
     if (hasPasswordProtection(metadata)) {
       const sessionSecret = getExpectedToken(c);
@@ -371,6 +373,7 @@ const handleTempFetch = async (c, rawShortKey) => {
       const cookies = parseCookies(c.req.header("Cookie"));
       const cookieKey = `file_auth_${encodeURIComponent(shortKey)}`;
       const isCookieAuthed = await verifySessionToken(cookies[cookieKey] || "", shortKey, metadata, sessionSecret);
+      isAuthedUser = isCookieAuthed;
 
       let inputPwd = "";
       if (c.req.method === "POST") {
@@ -420,6 +423,8 @@ const handleTempFetch = async (c, rawShortKey) => {
         return c.html(renderPasswordPromptHtml(shortKey, errorNotice), 200);
       }
 
+      isAuthedUser = true;
+
       // POST送信で成功した場合: CookieをセットしてクリーンなGET URLへ303リダイレクト！
       if (c.req.method === "POST" && isPasswordValid) {
         if (attemptKey) {
@@ -453,12 +458,32 @@ const handleTempFetch = async (c, rawShortKey) => {
     const totalBytes = value.byteLength;
     const rangeHeader = c.req.header("Range");
 
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const expiration = (metadata && metadata.expiration) ? metadata.expiration : (nowSeconds + 259200);
+    const remainingSeconds = Math.max(0, expiration - nowSeconds);
+
     const hasPassword = hasPasswordProtection(metadata);
-    // パスワードはアップロード時に確定し変更不可のため、公開ファイルは安全にキャッシュできる。
-    // パスワード保護ファイルはブラウザにもエッジにも保存しない。
-    const cacheControlHeader = hasPassword
-      ? "private, no-store, no-transform"
-      : "public, max-age=86400";
+    
+    // 残り寿命 (TTL) に応じた動的キャッシュ制御
+    let cacheControlHeader = "";
+    let cdnCacheControlHeader = "";
+
+    if (hasPassword) {
+      if (isAuthedUser) {
+        // パスワード認証済み本人：個人のブラウザローカルのみに残り寿命分だけキャッシュを許可
+        cacheControlHeader = `private, max-age=${remainingSeconds}`;
+        cdnCacheControlHeader = "private, no-store";
+      } else {
+        // 未認証：一切のキャッシュを不許可
+        cacheControlHeader = "private, no-store, no-transform";
+        cdnCacheControlHeader = "private, no-store";
+      }
+    } else {
+      // 通常ファイル：ブラウザ・エッジ両方でファイルの残り寿命分（TTL）と完全に動的同調・一致！
+      cacheControlHeader = `public, max-age=${remainingSeconds}`;
+      cdnCacheControlHeader = `public, max-age=${remainingSeconds}`;
+    }
+
     const varyHeader = hasPassword ? "Cookie, Accept-Encoding" : "Accept-Encoding";
 
     // Rangeリクエスト対応
@@ -483,6 +508,7 @@ const handleTempFetch = async (c, rawShortKey) => {
           "Content-Length": String(chunk.byteLength),
           "Accept-Ranges": "bytes",
           "Cache-Control": cacheControlHeader,
+          "Cloudflare-CDN-Cache-Control": cdnCacheControlHeader,
           "Vary": varyHeader,
           "Access-Control-Allow-Origin": "*",
         },
@@ -496,6 +522,7 @@ const handleTempFetch = async (c, rawShortKey) => {
         "Content-Length": String(totalBytes),
         "Accept-Ranges": "bytes",
         "Cache-Control": cacheControlHeader,
+        "Cloudflare-CDN-Cache-Control": cdnCacheControlHeader,
         "Vary": varyHeader,
         "Access-Control-Allow-Origin": "*",
       },
