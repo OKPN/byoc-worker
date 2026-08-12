@@ -11,6 +11,36 @@ const corsMiddleware = cors({
 });
 app.use("*", corsMiddleware);
 
+const getAdminToken = (c) => {
+  return c.env.API_TOKEN || c.env.AUTH_TOKEN || c.env.TOKEN || c.env.SECRET_TOKEN || c.env.api_token || "";
+};
+
+// Cloudflare CDN Cache Purge バックグラウンド非同期処理 (Pattern B)
+const purgeCacheAsync = async (env, targetUrls) => {
+  const zoneId = env.CLOUDFLARE_ZONE_ID;
+  const purgeToken = env.CLOUDFLARE_PURGE_TOKEN || env.CLOUDFLARE_API_TOKEN;
+  if (!zoneId || !purgeToken || !Array.isArray(targetUrls) || targetUrls.length === 0) {
+    return;
+  }
+
+  try {
+    const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/purge_cache`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${purgeToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ files: targetUrls }),
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      console.warn("Purge Cache API non-200 response:", errText);
+    }
+  } catch (err) {
+    console.warn("Purge Cache API background fetch error:", err);
+  }
+};
+
 function getExpectedToken(c) {
   return c.env.API_TOKEN || "";
 }
@@ -86,6 +116,11 @@ app.post("/temp-upload", async (c) => {
         size: body.byteLength,
       },
     });
+
+    // パターンB: 非同期バックグラウンド (ctx.waitUntil) でターゲットURLの旧404キャッシュを瞬時にパージ
+    if (c.executionCtx && typeof c.executionCtx.waitUntil === "function") {
+      c.executionCtx.waitUntil(purgeCacheAsync(c.env, [targetUrl]));
+    }
 
     return c.json({
       success: true,
@@ -589,6 +624,14 @@ app.post("/api/temp-delete", async (c) => {
     const { key } = await c.req.json();
     if (!key) return c.json({ error: "No key provided" }, 400);
     await c.env.TEMP_KV.delete(`temp_${key}`);
+
+    // パターンB: 非同期バックグラウンド (ctx.waitUntil) で削除したURLのキャッシュを瞬時にパージ
+    if (c.executionCtx && typeof c.executionCtx.waitUntil === "function") {
+      const publicOrigin = new URL(c.req.url).origin;
+      const targetUrl = `${publicOrigin}/${encodeURIComponent(key)}`;
+      c.executionCtx.waitUntil(purgeCacheAsync(c.env, [targetUrl]));
+    }
+
     return c.json({ success: true });
   } catch (error) {
     console.error("Delete temp file error:", error);
