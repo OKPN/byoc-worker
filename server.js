@@ -194,10 +194,11 @@ const derivePasswordHash = async (password, salt) => {
 };
 
 const createPasswordMetadata = async (password) => {
-  if (!password) return { passwordHash: "", passwordSalt: "" };
+  if (!password) return { password: "", passwordHash: "", passwordSalt: "" };
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const hash = await derivePasswordHash(password, salt);
   return {
+    password,
     passwordHash: bytesToBase64Url(hash),
     passwordSalt: bytesToBase64Url(salt),
   };
@@ -523,6 +524,7 @@ app.get("/api/temp-files", async (c) => {
         expiration,
         remaining,
         hasPassword: hasPasswordProtection(metadata),
+        password: metadata.password || "",
       };
     });
 
