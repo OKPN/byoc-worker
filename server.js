@@ -688,12 +688,22 @@ app.post("/api/upload", async (c) => {
 
     const ttl = Math.min(7 * 86400, Math.max(60, Number.isFinite(requestedTtl) ? requestedTtl : 259200));
 
-    // 🛡️ 3. 100% 暗号ランダムファイル名生成（身バレ防止・衝突全回避）
-    const randomArray = new Uint8Array(6);
-    crypto.getRandomValues(randomArray);
-    const randomKey = Array.from(randomArray, b => b.toString(36).padStart(2, "0")).join("").substring(0, 8);
-    const shortKey = `${randomKey}.${ext}`;
-    const kvKey = `temp_${shortKey}`;
+    // 🛡️ 3. 100% 暗号ランダムファイル名生成（6文字英数字）＋ 衝突回避保証ループ
+    let shortKey = "";
+    let kvKey = "";
+    let attempts = 0;
+    while (attempts < 5) {
+      const randomArray = new Uint8Array(5);
+      crypto.getRandomValues(randomArray);
+      const randomStr = Array.from(randomArray, b => b.toString(36).padStart(2, "0")).join("").substring(0, 6);
+      shortKey = `${randomStr}.${ext}`;
+      kvKey = `temp_${shortKey}`;
+
+      // 既存のキーがあるか確認（衝突チェック）
+      const existing = await c.env.TEMP_KV.get(kvKey, "arrayBuffer");
+      if (!existing) break; // 重複がない安全なキーであれば抜け出す
+      attempts++;
+    }
 
     // 🛡️ 4. 返却 URL (アクセストップのドメイン/オリジンを自動取得)
     const publicOrigin = new URL(c.req.url).origin;
