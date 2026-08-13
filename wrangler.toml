@@ -11,9 +11,6 @@ routes = [
 binding = "TEMP_KV"
 id = "YOUR_KV_NAMESPACE_ID"
 
-[vars]
-CUSTOM_DOMAIN = "your-custom-domain.com"
-
 [cache]
 enabled = true
 
@@ -33,9 +30,6 @@ routes = [] # workers.dev サブドメインのみを使用
 
 [env.staging.secrets]
 required = ["API_TOKEN"]
-
-[env.staging.vars]
-CUSTOM_DOMAIN = ""
 
 [[env.staging.kv_namespaces]]
 binding = "TEMP_KV"

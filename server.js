@@ -12,52 +12,53 @@ const corsMiddleware = cors({
 app.use("*", corsMiddleware);
 
 const getApiToken = (c) => c.env.API_TOKEN || "";
+const getUploadToken = (c) => c.env.UPLOAD_TOKEN || "";
 
-// Cloudflare CDN Cache Purge バックグラウンド非同期処理 (Pattern B)
-const purgeCacheAsync = async (env, targetUrls) => {
-  const zoneId = env.CLOUDFLARE_ZONE_ID;
-  const purgeToken = env.CLOUDFLARE_PURGE_TOKEN || env.CLOUDFLARE_API_TOKEN;
-  if (!zoneId || !purgeToken || !Array.isArray(targetUrls) || targetUrls.length === 0) {
+const checkAdminAuth = (c) => {
+  const adminToken = getApiToken(c).trim();
+  if (!adminToken) return false;
+  const authHeader = (c.req.header("Authorization") || "").trim();
+  const token = authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : authHeader;
+  return token === adminToken;
+};
+
+const checkUploadAuth = (c) => {
+  if (checkAdminAuth(c)) return true;
+  const uploadToken = getUploadToken(c).trim();
+  if (!uploadToken) return false;
+  const authHeader = (c.req.header("Authorization") || "").trim();
+  const token = authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : authHeader;
+  return token === uploadToken;
+};
+
+// 認証チェックミドルウェア (/api/* 用)
+app.use("/api/*", async (c, next) => {
+  // CORS プリフライト (OPTIONS) リクエストは無条件でパス
+  if (c.req.method === "OPTIONS") {
+    await next();
     return;
   }
 
-  try {
-    const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/purge_cache`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${purgeToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ files: targetUrls }),
-    });
-    if (!response.ok) {
-      const errText = await response.text();
-      console.warn("Purge Cache API non-200 response:", errText);
-    }
-  } catch (err) {
-    console.warn("Purge Cache API background fetch error:", err);
-  }
-};
-
-const requireApiToken = (c) => {
-  const expectedToken = getApiToken(c);
-  if (!expectedToken) {
-    return c.json({ error: "Service unavailable: API_TOKEN is not configured" }, 503, {
+  if (!getApiToken(c) && !getUploadToken(c)) {
+    return c.json({ success: false, error: "Service unavailable: API_TOKEN is not configured" }, 503, {
       "Cache-Control": "no-store",
     });
   }
-  const authHeader = c.req.header("Authorization");
-  const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : "";
-  if (token !== expectedToken) {
-    return c.json({ error: "Unauthorized" }, 401, { "Cache-Control": "no-store" });
-  }
-  return null;
-};
 
-// 認証チェックミドルウェア
-app.use("/api/*", async (c, next) => {
-  const authError = requireApiToken(c);
-  if (authError) return authError;
+  // 投稿専用 API は API_TOKEN または UPLOAD_TOKEN で許可
+  if (c.req.path === "/api/upload") {
+    if (!checkUploadAuth(c)) {
+      return c.json({ success: false, error: "Unauthorized: Invalid token" }, 401, { "Cache-Control": "no-store" });
+    }
+    await next();
+    return;
+  }
+
+  // 一覧・削除などの管理 API は従来の API_TOKEN が必須
+  if (!checkAdminAuth(c)) {
+    return c.json({ success: false, error: "Unauthorized: Invalid token" }, 401, { "Cache-Control": "no-store" });
+  }
+
   await next();
 });
 
@@ -375,16 +376,6 @@ const getCustomNotFoundResponse = async (c) => {
 // 2. 一時共有ファイル配信ハンドラ
 const handleTempFetch = async (c, rawShortKey) => {
   try {
-    const hostname = new URL(c.req.url).hostname.toLowerCase();
-    const customDomain = (c.env.CUSTOM_DOMAIN || "").toLowerCase();
-
-    // カスタムドメインが設定されている環境で、.workers.dev ドメイン経由で画像直リンクを開こうとした場合は
-    // 独自ドメイン以外からのアクセスとして 404 ガチャ画像へ倒す
-    if (customDomain && hostname !== customDomain && hostname.endsWith(".workers.dev")) {
-      const customNotFound = await getCustomNotFoundResponse(c);
-      if (customNotFound) return customNotFound;
-      return c.text("404 Not Found — Access restricted to custom domain.", 404);
-    }
 
     const shortKey = decodeURIComponent(rawShortKey);
     const kvKey = `temp_${shortKey}`;
@@ -592,7 +583,156 @@ app.post("/:shortKey", async (c) => {
   return handleTempFetch(c, shortKey);
 });
 
-// 3. 一時共有ファイル一覧取得 API (GET /api/temp-files)
+// Cloudflare CDN Cache Purge バックグラウンド非同期処理 (Pattern B)
+const purgeCacheAsync = async (env, targetUrls) => {
+  const zoneId = env.CLOUDFLARE_ZONE_ID;
+  const purgeToken = env.CLOUDFLARE_PURGE_TOKEN || env.CLOUDFLARE_API_TOKEN;
+  if (!zoneId || !purgeToken || !Array.isArray(targetUrls) || targetUrls.length === 0) {
+    return;
+  }
+
+  try {
+    const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/purge_cache`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${purgeToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ files: targetUrls }),
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      console.warn("Purge Cache API non-200 response:", errText);
+    }
+  } catch (err) {
+    console.warn("Purge Cache API background fetch error:", err);
+  }
+};
+
+// 投稿専用 API (POST /api/upload)
+const UPLOAD_RATE_MAP = new Map(); // IPベース 1分間レート制限
+
+app.post("/api/upload", async (c) => {
+  try {
+    // 🛡️ 1. レート制限チェック（1分間に最大 10 投稿まで）
+    const clientIp = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "anonymous";
+    const nowMs = Date.now();
+    const userLog = UPLOAD_RATE_MAP.get(clientIp) || [];
+    const recentUploads = userLog.filter(t => nowMs - t < 60000);
+
+    if (recentUploads.length >= 10) {
+      return c.json({ success: false, error: "Rate limit exceeded. Please wait 1 minute before uploading again." }, 429, {
+        "Cache-Control": "no-store",
+      });
+    }
+
+    let fileBuffer = null;
+    let originalFilename = c.req.query("filename") || "";
+    let password = c.req.header("X-Upload-Password") || c.req.query("password") || "";
+    let contentType = "application/octet-stream";
+    let requestedTtl = Number.parseInt(c.req.query("ttl") || "259200", 10);
+
+    const contentTypeHeader = c.req.header("Content-Type") || "";
+
+    if (contentTypeHeader.includes("multipart/form-data")) {
+      const formData = await c.req.parseBody();
+      const uploadedFile = formData.file || formData.image;
+      if (uploadedFile instanceof File) {
+        originalFilename = originalFilename || uploadedFile.name || "upload_file";
+        contentType = uploadedFile.type || getContentTypeFromFilename(originalFilename);
+        fileBuffer = await uploadedFile.arrayBuffer();
+      }
+      if (formData.password) password = String(formData.password).trim();
+      if (formData.ttl) requestedTtl = Number.parseInt(String(formData.ttl), 10);
+    }
+
+    if (!fileBuffer) {
+      fileBuffer = await c.req.raw.arrayBuffer();
+      originalFilename = originalFilename || "upload_file";
+      contentType = c.req.header("Content-Type") || getContentTypeFromFilename(originalFilename);
+    }
+
+    if (!fileBuffer || fileBuffer.byteLength === 0) {
+      return c.json({ success: false, error: "No file content uploaded" }, 400);
+    }
+
+    // 🛡️ 2. ファイル拡張子バリデーション (画像・動画のみ許可)
+    const ALLOWED_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "gif", "avif", "mp4", "webm", "ogv", "mov", "m4v"];
+    let ext = originalFilename.includes(".") ? originalFilename.split(".").pop().toLowerCase() : "";
+    if (!ext || !ALLOWED_EXTENSIONS.includes(ext)) {
+      // MIMEタイプから拡張子推定
+      const mimeExtMap = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/gif": "gif",
+        "image/avif": "avif",
+        "video/mp4": "mp4",
+        "video/webm": "webm",
+        "video/quicktime": "mov",
+      };
+      ext = mimeExtMap[contentType] || "";
+    }
+
+    if (!ext || !ALLOWED_EXTENSIONS.includes(ext)) {
+      return c.json({
+        success: false,
+        error: "Invalid file format. Only image and video files are allowed.",
+      }, 400);
+    }
+
+    const MAX_KV_BYTES = 25 * 1024 * 1024; // 25MB
+    if (fileBuffer.byteLength > MAX_KV_BYTES) {
+      return c.json({ success: false, error: "File size exceeds 25MB limit" }, 413);
+    }
+
+    const ttl = Math.min(7 * 86400, Math.max(60, Number.isFinite(requestedTtl) ? requestedTtl : 259200));
+
+    // 🛡️ 3. 100% 暗号ランダムファイル名生成（身バレ防止・衝突全回避）
+    const randomArray = new Uint8Array(6);
+    crypto.getRandomValues(randomArray);
+    const randomKey = Array.from(randomArray, b => b.toString(36).padStart(2, "0")).join("").substring(0, 8);
+    const shortKey = `${randomKey}.${ext}`;
+    const kvKey = `temp_${shortKey}`;
+
+    // 🛡️ 4. 返却 URL (アクセストップのドメイン/オリジンを自動取得)
+    const publicOrigin = new URL(c.req.url).origin;
+    const targetUrl = `${publicOrigin}/${encodeURIComponent(shortKey)}`;
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const expiration = nowSeconds + ttl;
+
+    await c.env.TEMP_KV.put(kvKey, fileBuffer, {
+      expirationTtl: ttl,
+      metadata: {
+        contentType,
+        filename: shortKey,
+        expiration,
+        ...(await createPasswordMetadata(password)),
+        size: fileBuffer.byteLength,
+      },
+    });
+
+    // レート制限の記録更新
+    recentUploads.push(nowMs);
+    UPLOAD_RATE_MAP.set(clientIp, recentUploads);
+
+    if (c.executionCtx && typeof c.executionCtx.waitUntil === "function") {
+      c.executionCtx.waitUntil(purgeCacheAsync(c.env, [targetUrl]));
+    }
+
+    return c.json({
+      success: true,
+      url: targetUrl,
+      key: shortKey,
+      ttl: ttl,
+      hasPassword: Boolean(password),
+    });
+  } catch (error) {
+    console.error("Dedicated upload API error:", error);
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
 // メタデータに size を保存済みのため、ファイル実体を読まずに一覧を返せる（KV読み込み N 回削減）
 app.get("/api/temp-files", async (c) => {
   try {
