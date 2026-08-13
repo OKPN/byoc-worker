@@ -61,8 +61,10 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
-// ルートアクセス（無害な404エラーに偽装）
-app.get("/", (c) => {
+// ルートアクセス（/）も 404 カスタム画像ガチャを表示
+app.get("/", async (c) => {
+  const customNotFound = await getCustomNotFoundResponse(c);
+  if (customNotFound) return customNotFound;
   return c.text("404 Not Found", 404);
 });
 
@@ -373,6 +375,17 @@ const getCustomNotFoundResponse = async (c) => {
 // 2. 一時共有ファイル配信ハンドラ
 const handleTempFetch = async (c, rawShortKey) => {
   try {
+    const hostname = new URL(c.req.url).hostname.toLowerCase();
+    const customDomain = (c.env.CUSTOM_DOMAIN || "").toLowerCase();
+
+    // カスタムドメインが設定されている環境で、.workers.dev ドメイン経由で画像直リンクを開こうとした場合は
+    // 独自ドメイン以外からのアクセスとして 404 ガチャ画像へ倒す
+    if (customDomain && hostname !== customDomain && hostname.endsWith(".workers.dev")) {
+      const customNotFound = await getCustomNotFoundResponse(c);
+      if (customNotFound) return customNotFound;
+      return c.text("404 Not Found — Access restricted to custom domain.", 404);
+    }
+
     const shortKey = decodeURIComponent(rawShortKey);
     const kvKey = `temp_${shortKey}`;
     const { value, metadata: storedMetadata } = await c.env.TEMP_KV.getWithMetadata(kvKey, "arrayBuffer");
