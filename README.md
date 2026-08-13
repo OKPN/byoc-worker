@@ -109,8 +109,58 @@ If you want to serve your uploaded files using your own custom domain (e.g., `im
 
 ---
 
+## 📡 Dedicated Upload API (`POST /api/upload`)
+
+A lightweight REST endpoint designed to directly upload images and videos from external applications, CLI tools, 5ch browsers, or custom scripts and receive a direct shareable URL.
+
+### 🛡️ Key Features & Security Design
+
+- **Granular Privilege Separation (`UPLOAD_TOKEN`)**: Configure an optional `UPLOAD_TOKEN` via `npx wrangler secret put UPLOAD_TOKEN`. Requests using `UPLOAD_TOKEN` can **only** upload files. Attempts to list or delete files with this token are strictly rejected (`401 Unauthorized`).
+- **Privacy Protection (Automatic Key Randomization)**: Original file names (e.g., `Screenshot_2026_LINE.jpg`) are stripped to prevent privacy leaks (doxxing) and key collisions. Files are assigned a cryptographically secure 8-character random string (e.g., `3c5e5f2q.jpg`).
+- **Rate Limiting**: Built-in edge rate limiter restricts uploads to a maximum of 10 requests per minute per IP to prevent spam attacks and quota exhaustion.
+- **Format Validation**: Accepts image and video files (`jpg`, `jpeg`, `png`, `webp`, `gif`, `avif`, `mp4`, `webm`, `mov`, etc.) up to 25MB per file.
+
+### 📥 Endpoint Specification
+
+```http
+POST /api/upload
+Authorization: Bearer <UPLOAD_TOKEN or API_TOKEN>
+Content-Type: multipart/form-data
+```
+
+#### Request Parameters (`multipart/form-data`)
+
+| Parameter | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `file` (or `image`) | File | **Yes** | Image or video file to upload (max 25MB). |
+| `password` | String | Optional | Set a viewing password for authorization. |
+| `ttl` | Integer | Optional | Expiration time in seconds (default: `259200` = 3 days). |
+
+#### 💻 cURL Example
+
+```bash
+curl -X POST "https://your-worker-domain.com/api/upload" \
+  -H "Authorization: Bearer YOUR_UPLOAD_TOKEN" \
+  -F "file=@/path/to/image.jpg"
+```
+
+#### 📤 Response Example (`200 OK`)
+
+```json
+{
+  "success": true,
+  "url": "https://kv.k7m.f5.si/3c5e5f2q.jpg",
+  "key": "3c5e5f2q.jpg",
+  "ttl": 259200,
+  "hasPassword": false
+}
+```
+
+---
+
 ## 🛡️ Security & Privacy Features
 
-- **Root Endpoint Concealment (`GET /`)**: Direct requests to `https://your-worker.dev/` return a discrete `404 Not Found` plain text response to conceal backend service identity.
-- **Bearer Token Authorization**: Unauthorized upload, list, or deletion requests are rejected with `401 Unauthorized`.
+- **Root & Expired 404 Gacha Asset**: Direct requests to `GET /` or expired files serve dynamic random 404 pixel art images (`404.webp`, `404-cat.jpg`, `404-robot.jpg`) cached for 30 days on Cloudflare Edge.
+- **Non-Blocking Background Purge Cache**: Immediate Cloudflare CDN Edge Cache purge via `ctx.waitUntil` (Pattern B) upon file upload and delete.
+- **Bearer Token Authorization**: Protected endpoints require `API_TOKEN` or `UPLOAD_TOKEN`. Unauthorized requests return `401 Unauthorized`.
 - **Automatic Expiration (TTL)**: Files automatically expire and are permanently purged from KV storage based on the selected TTL (1 to 7 days).
