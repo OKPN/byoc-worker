@@ -149,7 +149,7 @@ curl -X POST "https://your-worker-domain.com/api/upload" \
 ```json
 {
   "success": true,
-  "url": "https://kv.k7m.f5.si/3c5e5f2q.jpg",
+  "url": "https://your-custom-domain.com/3c5e5f2q.jpg",
   "key": "3c5e5f2q.jpg",
   "ttl": 259200,
   "hasPassword": false

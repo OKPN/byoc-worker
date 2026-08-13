@@ -14,11 +14,18 @@ app.use("*", corsMiddleware);
 const getApiToken = (c) => c.env.API_TOKEN || "";
 const getUploadToken = (c) => c.env.UPLOAD_TOKEN || "";
 
+const extractTokenFromReq = (c) => {
+  const authHeader = (c.req.header("Authorization") || "").trim();
+  if (authHeader) {
+    return authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : authHeader;
+  }
+  return (c.req.query("api_token") || c.req.query("token") || "").trim();
+};
+
 const checkAdminAuth = (c) => {
   const adminToken = getApiToken(c).trim();
   if (!adminToken) return false;
-  const authHeader = (c.req.header("Authorization") || "").trim();
-  const token = authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : authHeader;
+  const token = extractTokenFromReq(c);
   return token === adminToken;
 };
 
@@ -26,8 +33,7 @@ const checkUploadAuth = (c) => {
   if (checkAdminAuth(c)) return true;
   const uploadToken = getUploadToken(c).trim();
   if (!uploadToken) return false;
-  const authHeader = (c.req.header("Authorization") || "").trim();
-  const token = authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : authHeader;
+  const token = extractTokenFromReq(c);
   return token === uploadToken;
 };
 
@@ -72,8 +78,9 @@ app.get("/", async (c) => {
 // 1. 一時共有アップロード受取 (POST /temp-upload)
 app.post("/temp-upload", async (c) => {
   try {
-    const authError = requireApiToken(c);
-    if (authError) return authError;
+    if (!checkAdminAuth(c)) {
+      return c.json({ error: "Unauthorized: Invalid token" }, 401, { "Cache-Control": "no-store" });
+    }
 
     const rawFilename = c.req.query("filename") || "file";
     const requestedTtl = Number.parseInt(c.req.query("ttl") || "259200", 10);
