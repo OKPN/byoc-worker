@@ -345,39 +345,124 @@ const getContentTypeFromFilename = (filename, fallback = "application/octet-stre
   return mimeTypes[ext] || fallback;
 };
 
-const NOT_FOUND_ASSETS = [
-  { path: "/404.webp", mime: "image/webp" },
-  { path: "/404-cat.jpg", mime: "image/jpeg" },
-  { path: "/404-robot.jpg", mime: "image/jpeg" },
-];
+const CATBOX_404_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>404 - File Not Found</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f7f7f8;
+      background-image: 
+        repeating-linear-gradient(45deg, rgba(0, 0, 0, 0.02) 0, rgba(0, 0, 0, 0.02) 1px, transparent 0, transparent 8px),
+        repeating-linear-gradient(-45deg, rgba(0, 0, 0, 0.02) 0, rgba(0, 0, 0, 0.02) 1px, transparent 0, transparent 8px);
+      color: #222;
+      text-align: center;
+      padding: 24px 16px;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      max-width: 480px;
+      width: 100%;
+    }
+    .error-code {
+      font-size: 76px;
+      font-weight: 700;
+      color: #2b2e35;
+      line-height: 1;
+      letter-spacing: 2px;
+      margin-bottom: 2px;
+    }
+    .question-mark {
+      font-size: 28px;
+      font-weight: 800;
+      color: #00bcd4;
+      line-height: 1;
+      margin-bottom: 12px;
+      user-select: none;
+    }
+    .character-img {
+      display: block;
+      width: 100%;
+      max-width: 260px;
+      height: auto;
+      object-fit: contain;
+      margin: 0 auto 20px auto;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+    .message {
+      font-size: 15px;
+      font-weight: 600;
+      color: #2b2b2b;
+      line-height: 1.5;
+      margin-bottom: 24px;
+    }
+    .home-link {
+      display: inline-block;
+      padding: 7px 32px;
+      border: 1.5px solid #2f7584;
+      border-radius: 9999px;
+      color: #4a3e7a;
+      text-decoration: underline;
+      font-size: 14px;
+      font-weight: 500;
+      transition: all 0.2s ease;
+      background: transparent;
+    }
+    .home-link:hover {
+      background: rgba(47, 117, 132, 0.08);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="error-code">404</div>
+    <div class="question-mark">?</div>
+    <img class="character-img" src="/404-character.webp" alt="404 Not Found">
+    <div class="message">The file you're looking for doesn't exist<br>or has been removed.</div>
+    <a href="/" class="home-link">Click me to go home</a>
+  </div>
+</body>
+</html>`;
 
 const getCustomNotFoundResponse = async (c) => {
-  if (!c.env.ASSETS) return null;
-
   try {
-    const randomIndex = Math.floor(Math.random() * NOT_FOUND_ASSETS.length);
-    const chosenAsset = NOT_FOUND_ASSETS[randomIndex];
-
-    let asset = await c.env.ASSETS.fetch(new URL(chosenAsset.path, c.req.url));
-    if (!asset.ok) {
-      asset = await c.env.ASSETS.fetch(new URL("/404.webp", c.req.url));
+    if (c.env.ASSETS) {
+      const asset = await c.env.ASSETS.fetch(new URL("/404.html", c.req.url));
+      if (asset.ok) {
+        return new Response(asset.body, {
+          status: 404,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "public, max-age=86400",
+            "Cloudflare-CDN-Cache-Control": "public, max-age=2592000",
+          },
+        });
+      }
     }
-    if (!asset.ok) return null;
-
-    const contentType = asset.headers.get("Content-Type") || chosenAsset.mime || "image/jpeg";
-
-    return new Response(asset.body, {
-      status: 404,
-      headers: {
-        "Content-Type": contentType,
-        "Cache-Control": "public, max-age=86400",
-        "Cloudflare-CDN-Cache-Control": "public, max-age=2592000", // Cloudflare エッジ 30日 キャッシュ
-      },
-    });
   } catch (err) {
     console.error("Custom 404 asset fetch error:", err);
-    return null;
   }
+
+  return new Response(CATBOX_404_HTML, {
+    status: 404,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "public, max-age=86400",
+      "Cloudflare-CDN-Cache-Control": "public, max-age=2592000",
+    },
+  });
 };
 
 // 2. 一時共有ファイル配信ハンドラ
@@ -385,6 +470,25 @@ const handleTempFetch = async (c, rawShortKey) => {
   try {
 
     const shortKey = decodeURIComponent(rawShortKey);
+
+    // 静的アセット (404-character.webp など) の直接要求は Cloudflare Assets から 200 で返却
+    if (shortKey.startsWith("404-character.") || shortKey === "favicon.ico") {
+      if (c.env.ASSETS) {
+        const assetRes = await c.env.ASSETS.fetch(new URL(`/${shortKey}`, c.req.url));
+        if (assetRes.ok) {
+          const contentType = assetRes.headers.get("Content-Type") || getContentTypeFromFilename(shortKey);
+          return new Response(assetRes.body, {
+            status: 200,
+            headers: {
+              "Content-Type": contentType,
+              "Cache-Control": "public, max-age=2592000",
+              "Cloudflare-CDN-Cache-Control": "public, max-age=2592000",
+            },
+          });
+        }
+      }
+    }
+
     const kvKey = `temp_${shortKey}`;
     const { value, metadata: storedMetadata } = await c.env.TEMP_KV.getWithMetadata(kvKey, "arrayBuffer");
     let metadata = storedMetadata || {};
