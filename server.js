@@ -51,6 +51,12 @@ app.use("/api/*", async (c, next) => {
     });
   }
 
+  // URLリダイレクト解決 API (Civitai等の301転送先URL取得用) は認証不要で許可
+  if (c.req.path === "/api/resolve-url") {
+    await next();
+    return;
+  }
+
   // 投稿専用 API は API_TOKEN または UPLOAD_TOKEN で許可
   if (c.req.path === "/api/upload") {
     if (!checkUploadAuth(c)) {
@@ -66,6 +72,27 @@ app.use("/api/*", async (c, next) => {
   }
 
   await next();
+});
+
+// URL リダイレクト解決 API (301 リダイレクト先の真の URL を取得)
+app.get("/api/resolve-url", async (c) => {
+  const targetUrl = c.req.query("url");
+  if (!targetUrl) {
+    return c.json({ error: "Missing url parameter" }, 400);
+  }
+
+  try {
+    const res = await fetch(targetUrl, { method: "HEAD", redirect: "manual" });
+    const location = res.headers.get("location") || targetUrl;
+    return c.json({ url: location }, 200, {
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "public, max-age=86400",
+    });
+  } catch (err) {
+    return c.json({ url: targetUrl, error: err.message }, 200, {
+      "Access-Control-Allow-Origin": "*",
+    });
+  }
 });
 
 // ルートアクセス（/）も 404 カスタム画像ガチャを表示
