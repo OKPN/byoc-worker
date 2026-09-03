@@ -7,7 +7,7 @@ const app = new Hono();
 const corsMiddleware = cors({
   origin: "*",
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "Authorization", "X-Upload-Password"],
+  allowHeaders: ["Content-Type", "Authorization", "X-Upload-Password", "X-Has-Workflow"],
 });
 app.use("*", corsMiddleware);
 
