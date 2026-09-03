@@ -138,14 +138,44 @@ app.post("/temp-upload", async (c) => {
     const nowSeconds = Math.floor(Date.now() / 1000);
     const expiration = nowSeconds + ttl;
 
-    await c.env.TEMP_KV.put(kvKey, body, {
+    // 🧬 コンテンツ重複排除 (Content-Addressable Storage / SHA-256)
+    const sha256 = await computeSha256(body);
+    const blobKey = `blob_${sha256}`;
+
+    const existingBlob = await c.env.TEMP_KV.getWithMetadata(blobKey, "arrayBuffer");
+    const isDeduped = Boolean(existingBlob && existingBlob.value);
+
+    if (!isDeduped) {
+      await c.env.TEMP_KV.put(blobKey, body, {
+        expirationTtl: Math.max(ttl, 259200),
+        metadata: {
+          contentType,
+          size: body.byteLength,
+          expiration,
+        },
+      });
+    } else {
+      const curExp = existingBlob.metadata?.expiration || 0;
+      if (expiration > curExp) {
+        await c.env.TEMP_KV.put(blobKey, existingBlob.value, {
+          expirationTtl: ttl,
+          metadata: { ...(existingBlob.metadata || {}), expiration },
+        });
+      }
+    }
+
+    // 参照ポインタを temp_ に保存（実データは持たず1バイトマーカーのみでKV容量を極小化）
+    await c.env.TEMP_KV.put(kvKey, new Uint8Array([1]), {
       expirationTtl: ttl,
       metadata: {
+        blobKey,
         contentType,
         filename: shortKey,
         expiration,
         ...(await createPasswordMetadata(password)),
         size: body.byteLength,
+        hasWorkflow: Boolean(hasWorkflow),
+        deduped: isDeduped,
       },
     });
 
@@ -159,6 +189,7 @@ app.post("/temp-upload", async (c) => {
       url: targetUrl,
       ttl: ttl,
       hasPassword: Boolean(password),
+      deduped: isDeduped,
     });
   } catch (error) {
     console.error("KV Temp upload error:", error);
@@ -521,17 +552,27 @@ const handleTempFetch = async (c, rawShortKey) => {
     const { value, metadata: storedMetadata } = await c.env.TEMP_KV.getWithMetadata(kvKey, "arrayBuffer");
     let metadata = storedMetadata || {};
 
-    if (!value) {
-      // 任意の静的アセットがあれば、404 ステータスのまま画像を返す。
+    if (!value && !metadata.blobKey) {
       const customNotFound = await getCustomNotFoundResponse(c);
       if (customNotFound) return customNotFound;
-
-      // ブラウザには保存させず、Cloudflare エッジだけで 1 時間キャッシュする。
-      // これにより同じ消滅済み URL への再アクセスは Worker/KV を実行しない。
       return c.text("404 Not Found — File not found or expired.", 404, {
         "Cache-Control": "no-store",
         "Cloudflare-CDN-Cache-Control": "public, max-age=3600",
       });
+    }
+
+    // 🧬 重複排除ストレージ: blobKey があれば実体データを取得、なければ旧形式の value をそのまま使用
+    let actualBuffer = value;
+    if (metadata.blobKey) {
+      actualBuffer = await c.env.TEMP_KV.get(metadata.blobKey, "arrayBuffer");
+      if (!actualBuffer) {
+        const customNotFound = await getCustomNotFoundResponse(c);
+        if (customNotFound) return customNotFound;
+        return c.text("404 Not Found — File not found or expired.", 404, {
+          "Cache-Control": "no-store",
+          "Cloudflare-CDN-Cache-Control": "public, max-age=3600",
+        });
+      }
     }
 
     let isAuthedUser = false;
@@ -627,7 +668,7 @@ const handleTempFetch = async (c, rawShortKey) => {
       ? metadata.contentType
       : getContentTypeFromFilename(shortKey);
 
-    const totalBytes = value.byteLength;
+    const totalBytes = actualBuffer.byteLength;
     const rangeHeader = c.req.header("Range");
 
     const nowSeconds = Math.floor(Date.now() / 1000);
@@ -672,7 +713,7 @@ const handleTempFetch = async (c, rawShortKey) => {
         });
       }
 
-      const chunk = value.slice(start, end + 1);
+      const chunk = actualBuffer.slice(start, end + 1);
       return new Response(chunk, {
         status: 206,
         headers: {
@@ -688,7 +729,7 @@ const handleTempFetch = async (c, rawShortKey) => {
       });
     }
 
-    return new Response(value, {
+    return new Response(actualBuffer, {
       status: 200,
       headers: {
         "Content-Type": contentType,
@@ -749,6 +790,14 @@ const purgeCacheAsync = async (env, targetUrls) => {
 };
 
 // 投稿専用 API (POST /api/upload)
+
+// 🧬 コンテンツ重複排除用 SHA-256 ハッシュ計算
+async function computeSha256(arrayBuffer) {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
 const UPLOAD_RATE_MAP = new Map(); // IPベース 1分間レート制限
 
 app.post("/api/upload", async (c) => {
