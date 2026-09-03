@@ -1011,6 +1011,22 @@ app.post("/api/temp-extend", async (c) => {
       },
     });
 
+    // 🧬 重複排除の実データ(blobKey)も新しい期限に合わせて安全に延長
+    if (metadata && metadata.blobKey) {
+      try {
+        const { value: blobVal, metadata: blobMeta } = await c.env.TEMP_KV.getWithMetadata(metadata.blobKey, "stream");
+        if (blobVal) {
+          const curBlobExp = blobMeta?.expiration || 0;
+          if (newExp > curBlobExp) {
+            await c.env.TEMP_KV.put(metadata.blobKey, blobVal, {
+              expirationTtl: newTtl,
+              metadata: { ...(blobMeta || {}), expiration: newExp },
+            });
+          }
+        }
+      } catch (e) {}
+    }
+
     return c.json({ success: true, newRemaining: newTtl });
   } catch (error) {
     console.error("Extend temp file error:", error);
