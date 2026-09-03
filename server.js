@@ -114,6 +114,7 @@ app.post("/temp-upload", async (c) => {
     const ttl = Math.min(7 * 86400, Math.max(60, Number.isFinite(requestedTtl) ? requestedTtl : 259200));
     const password = c.req.header("X-Upload-Password") || c.req.query("password") || "";
     const contentType = c.req.header("Content-Type") || "application/octet-stream";
+    const hasWorkflow = c.req.header("X-Has-Workflow") === "true" || c.req.query("hasWorkflow") === "true";
 
     const baseFilename = rawFilename.replace(/[\/\\]/g, "_");
 
@@ -770,6 +771,7 @@ app.post("/api/upload", async (c) => {
     let contentType = "application/octet-stream";
     let requestedTtl = Number.parseInt(c.req.query("ttl") || "259200", 10);
 
+    const hasWorkflow = c.req.header("X-Has-Workflow") === "true" || c.req.query("hasWorkflow") === "true";
     const contentTypeHeader = c.req.header("Content-Type") || "";
 
     if (contentTypeHeader.includes("multipart/form-data")) {
