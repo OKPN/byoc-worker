@@ -197,6 +197,91 @@ app.post("/temp-upload", async (c) => {
   }
 });
 
+// 1.1 一時共有大容量チャンクアップロード受取 (POST /temp-upload-chunk)
+app.post("/temp-upload-chunk", async (c) => {
+  try {
+    if (!checkAdminAuth(c)) {
+      return c.json({ error: "Unauthorized: Invalid token" }, 401, { "Cache-Control": "no-store" });
+    }
+
+    const uploadId = c.req.query("uploadId");
+    const chunkIndex = Number.parseInt(c.req.query("chunkIndex") || "0", 10);
+    const totalChunks = Number.parseInt(c.req.query("totalChunks") || "1", 10);
+    const rawFilename = c.req.query("filename") || "file";
+    const requestedTtl = Number.parseInt(c.req.query("ttl") || "259200", 10);
+    const ttl = Math.min(7 * 86400, Math.max(60, Number.isFinite(requestedTtl) ? requestedTtl : 259200));
+    const fileSize = Number.parseInt(c.req.query("fileSize") || "0", 10);
+    const contentType = c.req.header("Content-Type") || "application/octet-stream";
+    const hasWorkflow = c.req.header("X-Has-Workflow") === "true" || c.req.query("hasWorkflow") === "true";
+
+    if (!uploadId) {
+      return c.json({ error: "Missing uploadId" }, 400);
+    }
+
+    const body = await c.req.raw.arrayBuffer();
+    const MAX_KV_BYTES = 25 * 1024 * 1024; // 25MB
+    if (body.byteLength > MAX_KV_BYTES) {
+      return c.json({ error: "チャンクサイズがKV上限(25MB)を超えています。" }, 413);
+    }
+
+    // 各チャンクデータを一時保存
+    const chunkKey = `chunk_${uploadId}_${chunkIndex}`;
+    await c.env.TEMP_KV.put(chunkKey, body, { expirationTtl: ttl });
+
+    // 最後のチャンクの場合、統合メタデータを temp_ に保存して完了
+    if (chunkIndex === totalChunks - 1) {
+      const baseFilename = rawFilename.replace(/[\/\\]/g, "_");
+      let shortKey = baseFilename;
+      const existing = await c.env.TEMP_KV.get(`temp_${shortKey}`, "arrayBuffer");
+      if (existing) {
+        const randPrefix = Math.random().toString(36).substring(2, 6);
+        shortKey = `${randPrefix}-${baseFilename}`;
+      }
+      const kvKey = `temp_${shortKey}`;
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const expiration = nowSeconds + ttl;
+      const publicOrigin = new URL(c.req.url).origin;
+      const targetUrl = `${publicOrigin}/${encodeURIComponent(shortKey)}`;
+
+      await c.env.TEMP_KV.put(kvKey, new Uint8Array([1]), {
+        expirationTtl: ttl,
+        metadata: {
+          isChunked: true,
+          uploadId,
+          totalChunks,
+          contentType,
+          filename: shortKey,
+          expiration,
+          size: fileSize || body.byteLength,
+          hasWorkflow: Boolean(hasWorkflow),
+        },
+      });
+
+      if (c.executionCtx && typeof c.executionCtx.waitUntil === "function") {
+        c.executionCtx.waitUntil(purgeCacheAsync(c.env, [targetUrl]));
+      }
+
+      return c.json({
+        success: true,
+        isComplete: true,
+        url: targetUrl,
+        shortKey,
+        ttl,
+      });
+    }
+
+    return c.json({
+      success: true,
+      isComplete: false,
+      chunkIndex,
+      totalChunks,
+    });
+  } catch (error) {
+    console.error("KV Chunk upload error:", error);
+    return c.json({ error: error.message }, 500);
+  }
+});
+
 const parseCookies = (cookieHeader) => {
   const list = {};
   if (!cookieHeader) return list;
@@ -552,7 +637,7 @@ const handleTempFetch = async (c, rawShortKey) => {
     const { value, metadata: storedMetadata } = await c.env.TEMP_KV.getWithMetadata(kvKey, "arrayBuffer");
     let metadata = storedMetadata || {};
 
-    if (!value && !metadata.blobKey) {
+    if (!value && !metadata.blobKey && !metadata.isChunked) {
       const customNotFound = await getCustomNotFoundResponse(c);
       if (customNotFound) return customNotFound;
       return c.text("404 Not Found — File not found or expired.", 404, {
@@ -561,17 +646,19 @@ const handleTempFetch = async (c, rawShortKey) => {
       });
     }
 
-    // 🧬 重複排除ストレージ: blobKey があれば実体データを取得、なければ旧形式の value をそのまま使用
+    // 🧬 重複排除ストレージ: blobKey があれば実体データを取得 (isChunked の場合はストリーミングで後段取得)
     let actualBuffer = value;
-    if (metadata.blobKey) {
-      actualBuffer = await c.env.TEMP_KV.get(metadata.blobKey, "arrayBuffer");
-      if (!actualBuffer) {
-        const customNotFound = await getCustomNotFoundResponse(c);
-        if (customNotFound) return customNotFound;
-        return c.text("404 Not Found — File not found or expired.", 404, {
-          "Cache-Control": "no-store",
-          "Cloudflare-CDN-Cache-Control": "public, max-age=3600",
-        });
+    if (!metadata.isChunked) {
+      if (metadata.blobKey) {
+        actualBuffer = await c.env.TEMP_KV.get(metadata.blobKey, "arrayBuffer");
+        if (!actualBuffer) {
+          const customNotFound = await getCustomNotFoundResponse(c);
+          if (customNotFound) return customNotFound;
+          return c.text("404 Not Found — File not found or expired.", 404, {
+            "Cache-Control": "no-store",
+            "Cloudflare-CDN-Cache-Control": "public, max-age=3600",
+          });
+        }
       }
     }
 
@@ -668,7 +755,7 @@ const handleTempFetch = async (c, rawShortKey) => {
       ? metadata.contentType
       : getContentTypeFromFilename(shortKey);
 
-    const totalBytes = actualBuffer.byteLength;
+    const totalBytes = metadata.isChunked ? (metadata.size || 0) : actualBuffer.byteLength;
     const rangeHeader = c.req.header("Range");
 
     const nowSeconds = Math.floor(Date.now() / 1000);
@@ -700,7 +787,45 @@ const handleTempFetch = async (c, rawShortKey) => {
 
     const varyHeader = hasPassword ? "Cookie, Accept-Encoding" : "Accept-Encoding";
 
-    // Rangeリクエスト対応
+    // 🧬 チャンク分割ファイル（25MB超）のストリーミング結合配信
+    if (metadata.isChunked) {
+      const uploadId = metadata.uploadId;
+      const totalChunks = metadata.totalChunks || 1;
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          try {
+            for (let i = 0; i < totalChunks; i++) {
+              const chunkKey = `chunk_${uploadId}_${i}`;
+              const chunkData = await c.env.TEMP_KV.get(chunkKey, "arrayBuffer");
+              if (!chunkData) {
+                controller.error(new Error(`Chunk ${i} missing or expired`));
+                return;
+              }
+              controller.enqueue(new Uint8Array(chunkData));
+            }
+            controller.close();
+          } catch (err) {
+            controller.error(err);
+          }
+        }
+      });
+
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          "Content-Type": contentType,
+          ...(totalBytes > 0 ? { "Content-Length": String(totalBytes) } : {}),
+          "Accept-Ranges": "none",
+          "Cache-Control": cacheControlHeader,
+          "Cloudflare-CDN-Cache-Control": cdnCacheControlHeader,
+          "Vary": varyHeader,
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
+    // Rangeリクエスト対応 (単一ファイル)
     if (rangeHeader && rangeHeader.startsWith("bytes=")) {
       const parts = rangeHeader.replace(/bytes=/, "").split("-");
       const start = parseInt(parts[0], 10) || 0;
@@ -969,7 +1094,15 @@ app.post("/api/temp-delete", async (c) => {
   try {
     const { key } = await c.req.json();
     if (!key) return c.json({ error: "No key provided" }, 400);
-    await c.env.TEMP_KV.delete(`temp_${key}`);
+
+    const kvKey = `temp_${key}`;
+    const { metadata } = await c.env.TEMP_KV.getWithMetadata(kvKey);
+    if (metadata?.isChunked && metadata.uploadId && metadata.totalChunks) {
+      for (let i = 0; i < metadata.totalChunks; i++) {
+        await c.env.TEMP_KV.delete(`chunk_${metadata.uploadId}_${i}`);
+      }
+    }
+    await c.env.TEMP_KV.delete(kvKey);
 
     // パターンB: 非同期バックグラウンド (ctx.waitUntil) で削除したURLのキャッシュを瞬時にパージ
     if (c.executionCtx && typeof c.executionCtx.waitUntil === "function") {
@@ -1010,6 +1143,19 @@ app.post("/api/temp-extend", async (c) => {
         expiration: newExp,
       },
     });
+
+    // 🧬 チャンク分割ファイル（isChunked）の各チャンクも延長
+    if (metadata?.isChunked && metadata.uploadId && metadata.totalChunks) {
+      try {
+        for (let i = 0; i < metadata.totalChunks; i++) {
+          const chunkKey = `chunk_${metadata.uploadId}_${i}`;
+          const chunkVal = await c.env.TEMP_KV.get(chunkKey, "stream");
+          if (chunkVal) {
+            await c.env.TEMP_KV.put(chunkKey, chunkVal, { expirationTtl: newTtl });
+          }
+        }
+      } catch (e) {}
+    }
 
     // 🧬 重複排除の実データ(blobKey)も新しい期限に合わせて安全に延長
     if (metadata && metadata.blobKey) {
