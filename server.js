@@ -1034,24 +1034,55 @@ app.post("/api/upload", async (c) => {
     const nowSeconds = Math.floor(Date.now() / 1000);
     const expiration = nowSeconds + ttl;
 
-    await c.env.TEMP_KV.put(kvKey, fileBuffer, {
+    // 🧬 コンテンツ重複排除 (Content-Addressable Storage / SHA-256)
+    const sha256 = await computeSha256(fileBuffer);
+    const blobKey = `blob_${sha256}`;
+
+    const existingBlob = await c.env.TEMP_KV.getWithMetadata(blobKey, "arrayBuffer");
+    const isDeduped = Boolean(existingBlob && existingBlob.value);
+
+    if (!isDeduped) {
+      await c.env.TEMP_KV.put(blobKey, fileBuffer, {
+        expirationTtl: Math.max(ttl, 259200),
+        metadata: {
+          contentType,
+          size: fileBuffer.byteLength,
+          expiration,
+        },
+      });
+    } else {
+      const curExp = existingBlob.metadata?.expiration || 0;
+      if (expiration > curExp) {
+        await c.env.TEMP_KV.put(blobKey, existingBlob.value, {
+          expirationTtl: ttl,
+          metadata: { ...(existingBlob.metadata || {}), expiration },
+        });
+      }
+    }
+
+    // 参照ポインタを temp_ に保存（実データは持たず1バイトマーカーのみでKV容量を極小化）
+    await c.env.TEMP_KV.put(kvKey, new Uint8Array([1]), {
       expirationTtl: ttl,
       metadata: {
+        blobKey,
         contentType,
         filename: shortKey,
         expiration,
         ...(await createPasswordMetadata(password)),
         size: fileBuffer.byteLength,
+        hasWorkflow: Boolean(hasWorkflow),
+        deduped: isDeduped,
       },
     });
+
+    // パターンB: 非同期バックグラウンド (ctx.waitUntil) でターゲットURLの旧404キャッシュを瞬時にパージ
+    if (c.executionCtx && typeof c.executionCtx.waitUntil === "function") {
+      c.executionCtx.waitUntil(purgeCacheAsync(c.env, [targetUrl]));
+    }
 
     // レート制限の記録更新
     recentUploads.push(nowMs);
     UPLOAD_RATE_MAP.set(clientIp, recentUploads);
-
-    if (c.executionCtx && typeof c.executionCtx.waitUntil === "function") {
-      c.executionCtx.waitUntil(purgeCacheAsync(c.env, [targetUrl]));
-    }
 
     return c.json({
       success: true,
@@ -1059,6 +1090,7 @@ app.post("/api/upload", async (c) => {
       key: shortKey,
       ttl: ttl,
       hasPassword: Boolean(password),
+      deduped: isDeduped,
     });
   } catch (error) {
     console.error("Dedicated upload API error:", error);
