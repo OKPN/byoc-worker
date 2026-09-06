@@ -1125,6 +1125,8 @@ app.get("/api/temp-files", async (c) => {
         remaining,
         hasPassword: hasPasswordProtection(metadata),
         password: metadata.password || "",
+        deduped: Boolean(metadata.deduped),
+        blobKey: metadata.blobKey || "",
       };
     });
 
