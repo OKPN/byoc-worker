@@ -1019,8 +1019,16 @@ app.post("/api/upload", async (c) => {
       attempts++;
     }
 
-    // 🛡️ 4. 返却 URL (アクセストップのドメイン/オリジンを自動取得)
-    const publicOrigin = new URL(c.req.url).origin;
+    // 🛡️ 4. 返却 URL (クエリパラメータ、ヘッダー、環境変数のドメインを優先し、なければリクエストのオリジンを採用)
+    let publicOrigin = (c.req.query("domain") || c.req.header("X-Custom-Domain") || c.env.CUSTOM_DOMAIN || "").trim();
+    if (publicOrigin) {
+      if (!/^https?:\/\//i.test(publicOrigin)) {
+        publicOrigin = `https://${publicOrigin}`;
+      }
+      publicOrigin = publicOrigin.replace(/\/+$/, "");
+    } else {
+      publicOrigin = new URL(c.req.url).origin;
+    }
     const targetUrl = `${publicOrigin}/${encodeURIComponent(shortKey)}`;
 
     const nowSeconds = Math.floor(Date.now() / 1000);
