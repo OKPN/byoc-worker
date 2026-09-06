@@ -1002,6 +1002,10 @@ app.post("/api/upload", async (c) => {
 
     const ttl = Math.min(7 * 86400, Math.max(60, Number.isFinite(requestedTtl) ? requestedTtl : 259200));
 
+    if (!contentType || contentType === "application/octet-stream") {
+      contentType = getContentTypeFromFilename(`file.${ext}`);
+    }
+
     // 🛡️ 3. 100% 暗号ランダムファイル名生成（6文字英数字）＋ 衝突回避保証ループ
     let shortKey = "";
     let kvKey = "";
