@@ -57,8 +57,8 @@ app.use("/api/*", async (c, next) => {
     return;
   }
 
-  // 投稿専用 API は API_TOKEN または UPLOAD_TOKEN で許可
-  if (c.req.path === "/api/upload") {
+  // 投稿専用 API およびトークン検証 API は API_TOKEN または UPLOAD_TOKEN で許可
+  if (c.req.path === "/api/upload" || c.req.path === "/api/verify-upload") {
     if (!checkUploadAuth(c)) {
       return c.json({ success: false, error: "Unauthorized: Invalid token" }, 401, { "Cache-Control": "no-store" });
     }
@@ -1057,6 +1057,12 @@ app.post("/api/upload", async (c) => {
     return c.json({ success: false, error: error.message }, 500);
   }
 });
+
+// 投稿用トークン検証 API
+app.get("/api/verify-upload", async (c) => {
+  return c.json({ success: true, valid: true }, 200, { "Cache-Control": "no-store" });
+});
+
 // メタデータに size を保存済みのため、ファイル実体を読まずに一覧を返せる（KV読み込み N 回削減）
 app.get("/api/temp-files", async (c) => {
   try {
