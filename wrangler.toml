@@ -3,11 +3,13 @@ main = "server.js"
 compatibility_date = "2026-06-28"
 workers_dev = true
 
-routes = []
+routes = [
+  { pattern = "kv.k7m.f5.si", custom_domain = true }
+]
 
 [[kv_namespaces]]
 binding = "TEMP_KV"
-id = "YOUR_KV_NAMESPACE_ID"
+id = "4003c749c4cd45539759c8c0a1b3c1fa"
 
 [cache]
 enabled = true
@@ -31,7 +33,7 @@ required = ["API_TOKEN"]
 
 [[env.staging.kv_namespaces]]
 binding = "TEMP_KV"
-id = "YOUR_STAGING_KV_NAMESPACE_ID"
+id = "ad4390d332e649d48a51208a9d6a2a4c"
 
 [env.staging.assets]
 directory = "./assets"
