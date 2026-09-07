@@ -474,17 +474,43 @@ const renderPasswordPromptHtml = (filename, errorMsg = "") => {
 const getContentTypeFromFilename = (filename, fallback = "application/octet-stream") => {
   const ext = filename.split(".").pop().toLowerCase();
   const mimeTypes = {
-    mp4: "video/mp4",
-    webm: "video/webm",
-    mov: "video/quicktime",
-    m4v: "video/mp4",
-    avi: "video/x-msvideo",
+    // 画像
     jpg: "image/jpeg",
     jpeg: "image/jpeg",
     png: "image/png",
     webp: "image/webp",
     gif: "image/gif",
     svg: "image/svg+xml",
+    jxl: "image/jxl",
+    avif: "image/avif",
+    bmp: "image/bmp",
+    ico: "image/x-icon",
+    // 動画
+    mp4: "video/mp4",
+    webm: "video/webm",
+    mov: "video/quicktime",
+    m4v: "video/mp4",
+    avi: "video/x-msvideo",
+    ogv: "video/ogg",
+    // 音声
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+    m4a: "audio/mp4",
+    flac: "audio/flac",
+    aac: "audio/aac",
+    // 圧縮アーカイブ
+    zip: "application/zip",
+    "7z": "application/x-7z-compressed",
+    rar: "application/vnd.rar",
+    tar: "application/x-tar",
+    gz: "application/gzip",
+    // 文書・テキスト
+    pdf: "application/pdf",
+    txt: "text/plain; charset=utf-8",
+    md: "text/markdown; charset=utf-8",
+    json: "application/json; charset=utf-8",
+    csv: "text/csv; charset=utf-8",
   };
   return mimeTypes[ext] || fallback;
 };
@@ -787,6 +813,12 @@ const handleTempFetch = async (c, rawShortKey) => {
 
     const varyHeader = hasPassword ? "Cookie, Accept-Encoding" : "Accept-Encoding";
 
+    const ext = shortKey.includes(".") ? shortKey.split(".").pop().toLowerCase() : "";
+    const isArchive = ["zip", "7z", "rar", "tar", "gz"].includes(ext);
+    const contentDisposition = isArchive
+      ? `attachment; filename="${encodeURIComponent(metadata.filename || shortKey)}"`
+      : "inline";
+
     // 🧬 チャンク分割ファイル（25MB超）のストリーミング結合配信
     if (metadata.isChunked) {
       const uploadId = metadata.uploadId;
@@ -816,6 +848,7 @@ const handleTempFetch = async (c, rawShortKey) => {
         headers: {
           "Content-Type": contentType,
           ...(totalBytes > 0 ? { "Content-Length": String(totalBytes) } : {}),
+          "Content-Disposition": contentDisposition,
           "Accept-Ranges": "none",
           "Cache-Control": cacheControlHeader,
           "Cloudflare-CDN-Cache-Control": cdnCacheControlHeader,
@@ -845,6 +878,7 @@ const handleTempFetch = async (c, rawShortKey) => {
           "Content-Type": contentType,
           "Content-Range": `bytes ${start}-${end}/${totalBytes}`,
           "Content-Length": String(chunk.byteLength),
+          "Content-Disposition": contentDisposition,
           "Accept-Ranges": "bytes",
           "Cache-Control": cacheControlHeader,
           "Cloudflare-CDN-Cache-Control": cdnCacheControlHeader,
@@ -859,6 +893,7 @@ const handleTempFetch = async (c, rawShortKey) => {
       headers: {
         "Content-Type": contentType,
         "Content-Length": String(totalBytes),
+        "Content-Disposition": contentDisposition,
         "Accept-Ranges": "bytes",
         "Cache-Control": cacheControlHeader,
         "Cloudflare-CDN-Cache-Control": cdnCacheControlHeader,
@@ -970,8 +1005,19 @@ app.post("/api/upload", async (c) => {
       return c.json({ success: false, error: "No file content uploaded" }, 400);
     }
 
-    // 🛡️ 2. ファイル拡張子バリデーション (画像・動画のみ許可)
-    const ALLOWED_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "gif", "avif", "mp4", "webm", "ogv", "mov", "m4v"];
+    // 🛡️ 2. ファイル拡張子バリデーション (画像・動画・音声・アーカイブ・ドキュメントを許可。実行ファイル・スクリプト等は拒否)
+    const ALLOWED_EXTENSIONS = [
+      // 画像
+      "jpg", "jpeg", "png", "webp", "gif", "avif", "jxl", "bmp", "ico",
+      // 動画
+      "mp4", "webm", "ogv", "mov", "m4v", "avi",
+      // 音声
+      "mp3", "wav", "ogg", "m4a", "flac", "aac",
+      // 圧縮アーカイブ
+      "zip", "7z", "rar", "tar", "gz",
+      // 文書・テキスト
+      "pdf", "txt", "md", "json", "csv",
+    ];
     let ext = originalFilename.includes(".") ? originalFilename.split(".").pop().toLowerCase() : "";
     if (!ext || !ALLOWED_EXTENSIONS.includes(ext)) {
       // MIMEタイプから拡張子推定
@@ -981,9 +1027,30 @@ app.post("/api/upload", async (c) => {
         "image/webp": "webp",
         "image/gif": "gif",
         "image/avif": "avif",
+        "image/jxl": "jxl",
+        "image/bmp": "bmp",
+        "image/x-icon": "ico",
         "video/mp4": "mp4",
         "video/webm": "webm",
         "video/quicktime": "mov",
+        "video/x-msvideo": "avi",
+        "video/ogg": "ogv",
+        "audio/mpeg": "mp3",
+        "audio/wav": "wav",
+        "audio/ogg": "ogg",
+        "audio/mp4": "m4a",
+        "audio/flac": "flac",
+        "audio/aac": "aac",
+        "application/zip": "zip",
+        "application/x-7z-compressed": "7z",
+        "application/vnd.rar": "rar",
+        "application/x-tar": "tar",
+        "application/gzip": "gz",
+        "application/pdf": "pdf",
+        "text/plain": "txt",
+        "text/markdown": "md",
+        "application/json": "json",
+        "text/csv": "csv",
       };
       ext = mimeExtMap[contentType] || "";
     }
@@ -991,7 +1058,7 @@ app.post("/api/upload", async (c) => {
     if (!ext || !ALLOWED_EXTENSIONS.includes(ext)) {
       return c.json({
         success: false,
-        error: "Invalid file format. Only image and video files are allowed.",
+        error: "Invalid file format. Executable and script files are not allowed.",
       }, 400);
     }
 
