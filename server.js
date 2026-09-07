@@ -113,7 +113,10 @@ app.post("/temp-upload", async (c) => {
     const requestedTtl = Number.parseInt(c.req.query("ttl") || "259200", 10);
     const ttl = Math.min(7 * 86400, Math.max(60, Number.isFinite(requestedTtl) ? requestedTtl : 259200));
     const password = c.req.header("X-Upload-Password") || c.req.query("password") || "";
-    const contentType = c.req.header("Content-Type") || "application/octet-stream";
+    let contentType = c.req.header("Content-Type") || "";
+    if (!contentType || contentType === "application/octet-stream") {
+      contentType = getContentTypeFromFilename(rawFilename);
+    }
     const hasWorkflow = c.req.header("X-Has-Workflow") === "true" || c.req.query("hasWorkflow") === "true";
 
     const baseFilename = rawFilename.replace(/[\/\\]/g, "_");
@@ -243,13 +246,18 @@ app.post("/temp-upload-chunk", async (c) => {
       const publicOrigin = new URL(c.req.url).origin;
       const targetUrl = `${publicOrigin}/${encodeURIComponent(shortKey)}`;
 
+      let finalContentType = contentType;
+      if (!finalContentType || finalContentType === "application/octet-stream") {
+        finalContentType = getContentTypeFromFilename(shortKey);
+      }
+
       await c.env.TEMP_KV.put(kvKey, new Uint8Array([1]), {
         expirationTtl: ttl,
         metadata: {
           isChunked: true,
           uploadId,
           totalChunks,
-          contentType,
+          contentType: finalContentType,
           filename: shortKey,
           expiration,
           size: fileSize || body.byteLength,
